@@ -9,6 +9,9 @@ const ATTR_SEGMENT = "lk.segment_id";
 const ATTR_FINAL = "lk.transcription_final";
 const ATTR_TRACK = "lk.transcribed_track_id";
 
+const DEFAULT_GREETING =
+  "Hello! Thanks for reaching out to ACMeSIM support. I'm your virtual assistant. How can I help you today?";
+
 export default function Page() {
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
@@ -38,10 +41,15 @@ export default function Page() {
 
   const upsert = useCallback((m: Msg) => {
     setMsgs((cur) => {
-      const i = cur.findIndex((x) => x.id === m.id);
-      if (i === -1) return [...cur, m];
-      const next = cur.slice();
-      next[i] = { ...cur[i], ...m };
+      // Replace the initial default greeting placeholder once live agent messages start streaming
+      const cleaned =
+        m.role === "bot" && m.id !== "default-greeting" && cur.some((x) => x.id === "default-greeting")
+          ? cur.filter((x) => x.id !== "default-greeting")
+          : cur;
+      const i = cleaned.findIndex((x) => x.id === m.id);
+      if (i === -1) return [...cleaned, m];
+      const next = cleaned.slice();
+      next[i] = { ...cleaned[i], ...m };
       return next;
     });
   }, []);
@@ -50,6 +58,7 @@ export default function Page() {
     e.preventDefault();
     setError("");
     setConnecting(true);
+    setMsgs([]);
     try {
       const r = await fetch("/api/token", {
         method: "POST",
@@ -62,9 +71,8 @@ export default function Page() {
       const room = new Room({ adaptiveStream: true });
       roomRef.current = room;
 
-      // Everything the agent says (text reply, spoken reply transcript) and what the
-      // customer said by voice arrives on this topic. Each stream carries one segment.
-      room.registerTextStreamHandler("lk.transcription", async (reader) => {
+      // Handles agent replies (both spoken reply transcripts and text replies)
+      const handleStream = async (reader: Parameters<Parameters<typeof room.registerTextStreamHandler>[1]>[0]) => {
         try {
           const attrs = reader.info.attributes ?? {};
           const id = attrs[ATTR_SEGMENT] || reader.info.id;
@@ -80,7 +88,10 @@ export default function Page() {
         } catch {
           // Room disconnected or stream aborted; ignore
         }
-      });
+      };
+
+      room.registerTextStreamHandler("lk.transcription", handleStream);
+      room.registerTextStreamHandler("lk.chat", handleStream);
 
       room.on(RoomEvent.TrackSubscribed, (track) => {
         if (track.kind === Track.Kind.Audio) {
@@ -104,8 +115,14 @@ export default function Page() {
       await room.connect(data.url, data.token);
       await room.startAudio(); // allowed: we are inside the click handler
       room.remoteParticipants.forEach((p) => p.on(ParticipantEvent.IsSpeakingChanged, setAgentSpeaking));
-      setMsgs([]);
       setConnected(true);
+      // Ensure the agent sends/displays the first greeting message by default
+      upsert({
+        id: "default-greeting",
+        role: "bot",
+        text: DEFAULT_GREETING,
+        final: true,
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
       roomRef.current?.disconnect();
